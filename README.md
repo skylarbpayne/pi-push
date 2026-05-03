@@ -16,7 +16,21 @@ pi -e /path/to/pi-push
 
 ## Configure
 
-Create `~/.pi/agent/pi-push.json`:
+Configuration is optional. If you run `/push beelink` and `beelink` is an SSH alias, `pi-push` uses these defaults:
+
+```json
+{
+  "ssh": "beelink",
+  "remoteRoot": "~/code",
+  "remoteSessionDir": "~/.pi/agent/sessions/pushed",
+  "launch": {
+    "mode": "tmux-session",
+    "tmuxPrefix": "pi-push"
+  }
+}
+```
+
+Add config when you need path mappings or different directories. Create `~/.pi/agent/pi-push.json`:
 
 ```json
 {
@@ -39,6 +53,8 @@ Create `~/.pi/agent/pi-push.json`:
 ```
 
 Project config in `.pi/pi-push.json` overrides global config.
+
+Without a path mapping, repos are placed under `remoteRoot` by repo name. For example, `/Users/you/src/app` maps to `~/code/app`.
 
 ## Use
 

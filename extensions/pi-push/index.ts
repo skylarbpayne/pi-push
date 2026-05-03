@@ -127,9 +127,10 @@ function resolveHost(config: PushConfig, hostArg: string): { hostName: string; h
 	const names = Object.keys(hosts);
 	const hostName = hostArg || (names.length === 1 ? names[0] : "");
 	if (!hostName) throw new Error("Usage: /push <host>. No host was provided and multiple or no hosts are configured.");
-	const raw = hosts[hostName];
-	if (!raw) throw new Error(`Unknown push host: ${hostName}`);
-	if (!raw.ssh) throw new Error(`Host ${hostName} is missing ssh config.`);
+	const raw = hosts[hostName] ?? { ssh: hostName };
+	if (!hosts[hostName]) {
+		console.warn(`pi-push: no config for ${hostName}; using SSH alias defaults.`);
+	}
 	return {
 		hostName,
 		host: {
