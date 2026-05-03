@@ -1,6 +1,6 @@
 import { existsSync, statSync } from "node:fs";
 import { copyFile, mkdir, readFile } from "node:fs/promises";
-import { dirname, isAbsolute, join, resolve } from "node:path";
+import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { homedir } from "node:os";
 import type { ExtensionAPI, SessionEntry } from "@mariozechner/pi-coding-agent";
 
@@ -26,8 +26,10 @@ type ExecResult = { stdout: string; stderr: string; code: number | null; killed?
 type RepoPlan = {
 	localRoot: string;
 	remoteRoot: string;
+	remoteWorktree: string;
 	remoteUrl: string;
 	branch: string;
+	remoteBranch: string;
 	handoffBranch?: string;
 	dirty: boolean;
 	ahead: number;
@@ -158,8 +160,8 @@ async function buildPlan(pi: ExtensionAPI, ctx: any, hostName: string, host: Req
 	const sessionId = String(header.id ?? basenameNoExt(sessionFile));
 	const shortSessionId = sessionId.slice(0, 8);
 	const remoteSessionFile = `${trimSlash(expandedHost.remoteSessionDir)}/${basenameNoExt(sessionFile)}-${shortSessionId}.jsonl`;
-	const remoteCwd = mapPath(ctx.cwd, expandedHost);
 	const repos = await inferRepos(pi, ctx, expandedHost, sessionId);
+	const remoteCwd = mapIntoRemoteWorktree(ctx.cwd, repos) ?? mapPath(ctx.cwd, expandedHost);
 	return {
 		hostName,
 		host: expandedHost,
@@ -221,11 +223,14 @@ async function planRepo(pi: ExtensionAPI, root: string, host: Required<HostConfi
 	const dirty = (await git(pi, root, ["status", "--porcelain"])).stdout.trim().length > 0;
 	const ahead = await aheadCount(pi, root);
 	const action = dirty || ahead > 0 ? "handoff" : "checkout";
+	const remoteRoot = mapPath(root, host);
 	return {
 		localRoot: root,
-		remoteRoot: mapPath(root, host),
+		remoteRoot,
+		remoteWorktree: `${remoteRoot}.pi-worktrees/${sessionId.slice(0, 12)}`,
 		remoteUrl,
 		branch,
+		remoteBranch: `pi-push/${sessionId.slice(0, 12)}`,
 		handoffBranch: action === "handoff" ? `pi-handoff/${sessionId.slice(0, 12)}` : undefined,
 		dirty,
 		ahead,
@@ -257,7 +262,7 @@ async function confirmPlan(ctx: any, plan: PushPlan): Promise<boolean> {
 		`Push session to ${plan.hostName}?`,
 		`Session: ${plan.remoteSessionFile}`,
 		"",
-		...plan.repos.map((repo) => `- ${repo.action}: ${repo.localRoot} -> ${repo.remoteRoot}${repo.handoffBranch ? ` (${repo.handoffBranch})` : ` (${repo.branch})`}`),
+		...plan.repos.map((repo) => `- ${repo.action}: ${repo.localRoot} -> ${repo.remoteWorktree}${repo.handoffBranch ? ` (${repo.handoffBranch})` : ` (${repo.branch})`}`),
 	];
 	return await ctx.ui.confirm("Confirm pi-push", lines.join("\n"));
 }
@@ -296,24 +301,36 @@ async function createAndPushHandoff(pi: ExtensionAPI, repo: RepoPlan, sessionId:
 }
 
 async function prepareRemoteRepo(pi: ExtensionAPI, ssh: string, repo: RepoPlan) {
-	const branch = repo.handoffBranch ?? repo.branch;
+	const sourceBranch = repo.handoffBranch ?? repo.branch;
 	const parent = dirname(repo.remoteRoot);
+	const worktreeParent = dirname(repo.remoteWorktree);
 	const script = `
 set -e
 if [ ! -d ${q(repo.remoteRoot)} ]; then
   mkdir -p ${q(parent)}
   git clone ${q(repo.remoteUrl)} ${q(repo.remoteRoot)}
-fi
-cd ${q(repo.remoteRoot)}
-if [ -n "$(git status --porcelain)" ]; then
-  echo "Remote repo has dirty changes: ${repo.remoteRoot}" >&2
+elif [ ! -d ${q(`${repo.remoteRoot}/.git`)} ] && ! git -C ${q(repo.remoteRoot)} rev-parse --git-dir >/dev/null 2>&1; then
+  echo "Remote repo path exists but is not a git repo: ${repo.remoteRoot}" >&2
   exit 2
 fi
-git fetch origin ${q(`${branch}:refs/remotes/origin/${branch}`)}
-git switch ${q(branch)} 2>/dev/null || git switch -c ${q(branch)} --track ${q(`origin/${branch}`)}
-git pull --ff-only origin ${q(branch)}
+cd ${q(repo.remoteRoot)}
+git fetch origin ${q(`${sourceBranch}:refs/remotes/origin/${sourceBranch}`)}
+mkdir -p ${q(worktreeParent)}
+if [ -d ${q(repo.remoteWorktree)} ]; then
+  cd ${q(repo.remoteWorktree)}
+  if [ -n "$(git status --porcelain)" ]; then
+    echo "Remote worktree has dirty changes: ${repo.remoteWorktree}" >&2
+    exit 2
+  fi
+  git fetch origin ${q(`${sourceBranch}:refs/remotes/origin/${sourceBranch}`)}
+  git switch ${q(repo.remoteBranch)}
+  git merge --ff-only ${q(`origin/${sourceBranch}`)}
+else
+  git branch -f ${q(repo.remoteBranch)} ${q(`origin/${sourceBranch}`)}
+  git worktree add ${q(repo.remoteWorktree)} ${q(repo.remoteBranch)}
+fi
 `;
-	await run(pi, "ssh", [ssh, script], `Could not prepare remote repo: ${repo.remoteRoot}`);
+	await run(pi, "ssh", [ssh, script], `Could not prepare remote worktree: ${repo.remoteWorktree}`);
 }
 
 async function launchRemote(pi: ExtensionAPI, plan: PushPlan) {
@@ -352,6 +369,15 @@ function mapPath(localPath: string, host: Required<HostConfig>): string {
 	}
 	if (host.remoteRoot) return `${trimSlash(host.remoteRoot)}/${localPath.split("/").filter(Boolean).pop()}`;
 	throw new Error(`No remote path mapping for ${localPath}`);
+}
+
+function mapIntoRemoteWorktree(localPath: string, repos: RepoPlan[]): string | null {
+	const repo = repos
+		.filter((candidate) => localPath === candidate.localRoot || localPath.startsWith(`${candidate.localRoot}/`))
+		.sort((a, b) => b.localRoot.length - a.localRoot.length)[0];
+	if (!repo) return null;
+	const suffix = relative(repo.localRoot, localPath);
+	return suffix ? `${repo.remoteWorktree}/${suffix}` : repo.remoteWorktree;
 }
 
 function existingDir(path: string): string | null {

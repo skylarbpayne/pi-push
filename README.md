@@ -53,8 +53,14 @@ The command:
 1. Copies the current Pi session JSONL file to the remote host.
 2. Infers git repos from the current session and working directory.
 3. Creates and pushes `pi-handoff/<session-id>` when a repo has dirty or local-only work.
-4. Prepares the remote repo checkout.
+4. Prepares a remote git worktree for each repo.
 5. Starts Pi in a detached tmux session with a continuation prompt.
+
+Remote worktrees keep `pi-push` from clobbering an existing checkout. For a repo mapped to `/home/skylar/code/app`, the pushed session uses a worktree like:
+
+```text
+/home/skylar/code/app.pi-worktrees/<session-id>
+```
 
 Use dry-run mode to see the plan without changing anything:
 
@@ -85,17 +91,24 @@ Remote machine:
 - SSH is unreachable
 - the remote is missing `git`, `tmux`, or `pi`
 - a local repo is in the middle of a rebase, merge, or conflict
-- a remote repo has dirty changes
+- a remote pushed worktree has dirty changes
 - a path cannot be mapped to the remote machine
 - a push or checkout fails
 
-It includes untracked files in handoff commits. It does not include ignored files. It does not force-push or run `git reset --hard`.
+It includes untracked files in handoff commits. It does not include ignored files. It does not force-push, run `git reset --hard`, or check out over the remote's normal working tree.
 
 ## Cleanup
+
+Remote worktrees are ordinary git worktrees:
+
+```bash
+git -C /home/skylar/code/app worktree remove /home/skylar/code/app.pi-worktrees/<session-id>
+```
 
 Handoff branches are ordinary git branches:
 
 ```bash
 git branch -D pi-handoff/<session-id>
+git branch -D pi-push/<session-id>
 git push origin --delete pi-handoff/<session-id>
 ```
