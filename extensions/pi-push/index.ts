@@ -169,14 +169,14 @@ async function ensureRemotePrereqs(pi: ExtensionAPI, ctx: any, ssh: string) {
 	);
 	if (!ok) throw new Error(`Remote is missing ${missing.join(", ")}.`);
 
-	await run(pi, "ssh", [ssh, installPlan.command], `Could not install remote dependencies on ${ssh}.`);
+	await remoteBash(pi, ssh, installPlan.command, `Could not install remote dependencies on ${ssh}.`);
 	const stillMissing = await getMissingRemoteCommands(pi, ssh, ["git", "tmux", "pi"]);
 	if (stillMissing.length > 0) throw new Error(`Remote is still missing ${stillMissing.join(", ")} after install.`);
 }
 
 async function getMissingRemoteCommands(pi: ExtensionAPI, ssh: string, commands: string[]): Promise<string[]> {
-	const script = commands.map((cmd) => `command -v ${cmd} >/dev/null || printf '%s\\n' ${q(cmd)}`).join("\n");
-	const result = await run(pi, "ssh", [ssh, script], `Could not check remote dependencies on ${ssh}.`);
+	const script = commands.map((cmd) => `${remoteCommandExists(cmd)} || printf '%s\\n' ${q(cmd)}`).join("\n");
+	const result = await remoteBash(pi, ssh, script, `Could not check remote dependencies on ${ssh}.`);
 	return result.stdout.split("\n").map((line) => line.trim()).filter(Boolean);
 }
 
@@ -193,7 +193,7 @@ if command -v apk >/dev/null; then echo apk; exit 0; fi
 if command -v brew >/dev/null; then echo brew; exit 0; fi
 echo none
 `;
-	const manager = (await run(pi, "ssh", [ssh, probe], `Could not detect package manager on ${ssh}.`)).stdout.trim();
+	const manager = (await remoteBash(pi, ssh, probe, `Could not detect package manager on ${ssh}.`)).stdout.trim();
 	const packages = missing.filter((cmd) => cmd !== "pi");
 	const commands: string[] = [];
 
@@ -209,7 +209,7 @@ echo none
 	}
 
 	if (missing.includes("pi")) {
-		const hasNpm = (await run(pi, "ssh", [ssh, "command -v npm >/dev/null && echo yes || echo no"], `Could not check npm on ${ssh}.`)).stdout.trim() === "yes";
+		const hasNpm = (await remoteBash(pi, ssh, "command -v npm >/dev/null && echo yes || echo no", `Could not check npm on ${ssh}.`)).stdout.trim() === "yes";
 		if (!hasNpm) return null;
 		commands.push("npm install -g @mariozechner/pi-coding-agent");
 	}
@@ -218,7 +218,7 @@ echo none
 }
 
 async function buildPlan(pi: ExtensionAPI, ctx: any, hostName: string, host: Required<HostConfig>, sessionFile: string, dryRun: boolean): Promise<PushPlan> {
-	const remoteHome = (await run(pi, "ssh", [host.ssh, "printf %s \"$HOME\""], "Could not resolve remote home directory.")).stdout.trim();
+	const remoteHome = (await remoteBash(pi, host.ssh, "printf %s \"$HOME\"", "Could not resolve remote home directory.")).stdout.trim();
 	const expandedHost = expandHostRemotePaths(host, remoteHome);
 	const header = JSON.parse((await readFile(sessionFile, "utf8")).split("\n", 1)[0] ?? "{}");
 	const sessionId = String(header.id ?? basenameNoExt(sessionFile));
@@ -347,7 +347,7 @@ async function executePlan(pi: ExtensionAPI, ctx: any, plan: PushPlan) {
 }
 
 async function copySession(pi: ExtensionAPI, plan: PushPlan) {
-	await run(pi, "ssh", [plan.host.ssh, `mkdir -p ${q(dirname(plan.remoteSessionFile))}`], "Could not create remote session directory.");
+	await remoteBash(pi, plan.host.ssh, `mkdir -p ${q(dirname(plan.remoteSessionFile))}`, "Could not create remote session directory.");
 	await run(pi, "scp", [plan.sessionFile, `${plan.host.ssh}:${plan.remoteSessionFile}`], "Could not copy session file.");
 }
 
@@ -394,16 +394,16 @@ else
   git worktree add ${q(repo.remoteWorktree)} ${q(repo.remoteBranch)}
 fi
 `;
-	await run(pi, "ssh", [ssh, script], `Could not prepare remote worktree: ${repo.remoteWorktree}`);
+	await remoteBash(pi, ssh, script, `Could not prepare remote worktree: ${repo.remoteWorktree}`);
 }
 
 async function launchRemote(pi: ExtensionAPI, plan: PushPlan) {
 	const prompt = plan.host.continuationPrompt;
-	const piCommand = `cd ${q(plan.remoteCwd)} && pi --session ${q(plan.remoteSessionFile)} ${q(prompt)}`;
+	const piCommand = `cd ${q(plan.remoteCwd)} && $(pi_command) --session ${q(plan.remoteSessionFile)} ${q(prompt)}`;
 	const command = plan.host.launch.command
 		? renderTemplate(plan.host.launch.command, { remoteCwd: plan.remoteCwd, sessionFile: plan.remoteSessionFile, prompt, tmuxSession: plan.tmuxSession })
 		: `tmux new-session -d -s ${q(plan.tmuxSession)} ${q(piCommand)}`;
-	await run(pi, "ssh", [plan.host.ssh, command], "Could not launch remote Pi.");
+	await remoteBash(pi, plan.host.ssh, command, "Could not launch remote Pi.");
 }
 
 function renderTemplate(template: string, vars: Record<string, string>) {
@@ -455,6 +455,27 @@ function existingDir(path: string): string | null {
 
 async function git(pi: ExtensionAPI, cwd: string, args: string[]): Promise<ExecResult> {
 	return run(pi, "git", ["-C", cwd, ...args], `git ${args.join(" ")} failed in ${cwd}`);
+}
+
+async function remoteBash(pi: ExtensionAPI, ssh: string, script: string, message: string): Promise<ExecResult> {
+	return run(pi, "ssh", [ssh, `bash -lc ${q(remoteHelpers(script))}`], message);
+}
+
+function remoteHelpers(script: string): string {
+	return `
+pi_command() {
+  command -v pi 2>/dev/null && return 0
+  if command -v npm >/dev/null 2>&1; then
+    local npm_pi="$(npm prefix -g 2>/dev/null)/bin/pi"
+    if [ -x "$npm_pi" ]; then printf '%s\\n' "$npm_pi"; return 0; fi
+  fi
+  return 1
+}
+${script}`;
+}
+
+function remoteCommandExists(command: string): string {
+	return command === "pi" ? "pi_command >/dev/null" : `command -v ${command} >/dev/null`;
 }
 
 async function run(pi: ExtensionAPI, command: string, args: string[], message: string): Promise<ExecResult> {
