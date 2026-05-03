@@ -1,0 +1,22 @@
+{
+  "name": "pi-push",
+  "version": "0.1.0",
+  "description": "Push a Pi session to another machine over SSH and continue it there.",
+  "keywords": ["pi-package"],
+  "license": "MIT",
+  "type": "module",
+  "pi": {
+    "extensions": ["./extensions"]
+  },
+  "peerDependencies": {
+    "@mariozechner/pi-coding-agent": "*",
+    "typebox": "*"
+  },
+  "devDependencies": {
+    "@types/node": "latest",
+    "typescript": "latest"
+  },
+  "scripts": {
+    "check": "tsc --noEmit"
+  }
+}
