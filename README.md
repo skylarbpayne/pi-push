@@ -99,13 +99,21 @@ Remote machine:
 - `tmux`
 - `pi`
 
+If the remote is missing `git`, `tmux`, or `pi`, `pi-push` offers to install them. It supports `apt`, `dnf`, `yum`, `pacman`, `apk`, and Homebrew for `git`/`tmux`. It installs Pi with:
+
+```bash
+npm install -g @mariozechner/pi-coding-agent
+```
+
+If the remote lacks `npm`, install Node.js first.
+
 ## Safety
 
 `pi-push` refuses to continue when:
 
 - the current Pi session is ephemeral
 - SSH is unreachable
-- the remote is missing `git`, `tmux`, or `pi`
+- the remote is missing `git`, `tmux`, or `pi` and automatic install is unavailable or declined
 - a local repo is in the middle of a rebase, merge, or conflict
 - a remote pushed worktree has dirty changes
 - a path cannot be mapped to the remote machine

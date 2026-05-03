@@ -73,7 +73,7 @@ export default function (pi: ExtensionAPI) {
 
 				ctx.ui.notify(`Planning push to ${hostName}...`, "info");
 				await checkLocalPrereqs(pi);
-				await checkRemotePrereqs(pi, host.ssh);
+				await ensureRemotePrereqs(pi, ctx, host.ssh);
 
 				const plan = await buildPlan(pi, ctx, hostName, host, sessionFile, dryRun);
 				if (!(await confirmPlan(ctx, plan))) return;
@@ -150,8 +150,71 @@ async function checkLocalPrereqs(pi: ExtensionAPI) {
 	}
 }
 
-async function checkRemotePrereqs(pi: ExtensionAPI, ssh: string) {
-	await run(pi, "ssh", [ssh, "command -v git >/dev/null && command -v tmux >/dev/null && command -v pi >/dev/null"], "Remote is missing git, tmux, or pi.");
+async function ensureRemotePrereqs(pi: ExtensionAPI, ctx: any, ssh: string) {
+	const missing = await getMissingRemoteCommands(pi, ssh, ["git", "tmux", "pi"]);
+	if (missing.length === 0) return;
+
+	const installPlan = await getRemoteInstallPlan(pi, ssh, missing);
+	if (!installPlan) {
+		throw new Error(`Remote is missing ${missing.join(", ")}. Install them on ${ssh}, then try again.`);
+	}
+
+	if (!ctx.hasUI) {
+		throw new Error(`Remote is missing ${missing.join(", ")}. Run interactively to approve automatic install, or install them manually.`);
+	}
+
+	const ok = await ctx.ui.confirm(
+		"Install remote dependencies?",
+		[`Remote ${ssh} is missing: ${missing.join(", ")}`, "", "pi-push can run:", installPlan.command, "", "Continue?"].join("\n"),
+	);
+	if (!ok) throw new Error(`Remote is missing ${missing.join(", ")}.`);
+
+	await run(pi, "ssh", [ssh, installPlan.command], `Could not install remote dependencies on ${ssh}.`);
+	const stillMissing = await getMissingRemoteCommands(pi, ssh, ["git", "tmux", "pi"]);
+	if (stillMissing.length > 0) throw new Error(`Remote is still missing ${stillMissing.join(", ")} after install.`);
+}
+
+async function getMissingRemoteCommands(pi: ExtensionAPI, ssh: string, commands: string[]): Promise<string[]> {
+	const script = commands.map((cmd) => `command -v ${cmd} >/dev/null || printf '%s\\n' ${q(cmd)}`).join("\n");
+	const result = await run(pi, "ssh", [ssh, script], `Could not check remote dependencies on ${ssh}.`);
+	return result.stdout.split("\n").map((line) => line.trim()).filter(Boolean);
+}
+
+type RemoteInstallPlan = { command: string };
+
+async function getRemoteInstallPlan(pi: ExtensionAPI, ssh: string, missing: string[]): Promise<RemoteInstallPlan | null> {
+	const probe = `
+set -e
+if command -v apt-get >/dev/null; then echo apt; exit 0; fi
+if command -v dnf >/dev/null; then echo dnf; exit 0; fi
+if command -v yum >/dev/null; then echo yum; exit 0; fi
+if command -v pacman >/dev/null; then echo pacman; exit 0; fi
+if command -v apk >/dev/null; then echo apk; exit 0; fi
+if command -v brew >/dev/null; then echo brew; exit 0; fi
+echo none
+`;
+	const manager = (await run(pi, "ssh", [ssh, probe], `Could not detect package manager on ${ssh}.`)).stdout.trim();
+	const packages = missing.filter((cmd) => cmd !== "pi");
+	const commands: string[] = [];
+
+	if (packages.length > 0) {
+		const packageList = packages.map(q).join(" ");
+		if (manager === "apt") commands.push(`sudo apt-get update && sudo apt-get install -y ${packageList}`);
+		else if (manager === "dnf") commands.push(`sudo dnf install -y ${packageList}`);
+		else if (manager === "yum") commands.push(`sudo yum install -y ${packageList}`);
+		else if (manager === "pacman") commands.push(`sudo pacman -Sy --needed --noconfirm ${packageList}`);
+		else if (manager === "apk") commands.push(`sudo apk add ${packageList}`);
+		else if (manager === "brew") commands.push(`brew install ${packageList}`);
+		else return null;
+	}
+
+	if (missing.includes("pi")) {
+		const hasNpm = (await run(pi, "ssh", [ssh, "command -v npm >/dev/null && echo yes || echo no"], `Could not check npm on ${ssh}.`)).stdout.trim() === "yes";
+		if (!hasNpm) return null;
+		commands.push("npm install -g @mariozechner/pi-coding-agent");
+	}
+
+	return { command: commands.join(" && ") };
 }
 
 async function buildPlan(pi: ExtensionAPI, ctx: any, hostName: string, host: Required<HostConfig>, sessionFile: string, dryRun: boolean): Promise<PushPlan> {
