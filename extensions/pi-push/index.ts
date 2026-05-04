@@ -469,6 +469,13 @@ pi_command() {
     local npm_pi="$(npm prefix -g 2>/dev/null)/bin/pi"
     if [ -x "$npm_pi" ]; then printf '%s\\n' "$npm_pi"; return 0; fi
   fi
+  if command -v mise >/dev/null 2>&1; then
+    local mise_pi="$(mise where node 2>/dev/null)/bin/pi"
+    if [ -x "$mise_pi" ]; then printf '%s\\n' "$mise_pi"; return 0; fi
+  fi
+  for mise_pi in "$HOME"/.local/share/mise/installs/node/*/bin/pi; do
+    if [ -x "$mise_pi" ]; then printf '%s\\n' "$mise_pi"; return 0; fi
+  done
   return 1
 }
 ${script}`;
