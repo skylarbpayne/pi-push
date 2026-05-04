@@ -421,10 +421,13 @@ fi
 
 async function launchRemote(pi: ExtensionAPI, plan: PushPlan) {
 	const prompt = plan.host.continuationPrompt;
-	const piCommand = `cd ${q(plan.remoteCwd)} && $(pi_command) --session ${q(plan.remoteSessionFile)} ${q(prompt)}`;
+	const logFile = `${dirname(plan.remoteSessionFile)}/${plan.tmuxSession}.log`;
 	const command = plan.host.launch.command
 		? renderTemplate(plan.host.launch.command, { remoteCwd: plan.remoteCwd, sessionFile: plan.remoteSessionFile, prompt, tmuxSession: plan.tmuxSession })
-		: `tmux new-session -d -s ${q(plan.tmuxSession)} ${q(piCommand)}`;
+		: `
+pi_path="$(pi_command)" || { echo "Could not find pi" >&2; exit 1; }
+tmux new-session -d -s ${q(plan.tmuxSession)} "cd ${q(plan.remoteCwd)} && \"$pi_path\" --session ${q(plan.remoteSessionFile)} ${q(prompt)} 2>&1 | tee ${q(logFile)}; exec bash"
+`;
 	await remoteBash(pi, plan.host.ssh, command, "Could not launch remote Pi.");
 }
 
