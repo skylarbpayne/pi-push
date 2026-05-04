@@ -420,16 +420,103 @@ fi
 }
 
 async function launchRemote(pi: ExtensionAPI, plan: PushPlan) {
-	const prompt = plan.host.continuationPrompt;
-	const logFile = `${dirname(plan.remoteSessionFile)}/${plan.tmuxSession}.log`;
-	const command = plan.host.launch.command
-		? renderTemplate(plan.host.launch.command, { remoteCwd: plan.remoteCwd, sessionFile: plan.remoteSessionFile, prompt, tmuxSession: plan.tmuxSession })
-		: `
-pi_path="$(pi_command)" || { echo "Could not find pi" >&2; exit 1; }
-tmux new-session -d -s ${q(plan.tmuxSession)} "cd ${q(plan.remoteCwd)} && \"$pi_path\" --session ${q(plan.remoteSessionFile)} ${q(prompt)} 2>&1 | tee ${q(logFile)}; exec bash"
-`;
-	await remoteBash(pi, plan.host.ssh, command, "Could not launch remote Pi.");
+	const runnerDir = `${dirname(plan.remoteSessionFile)}/../pi-push`;
+	const runnerPath = `${runnerDir}/run-session.sh`;
+	const planPath = `${runnerDir}/plans/${plan.shortSessionId}.json`;
+	const launchPlan = {
+		tmuxSession: plan.tmuxSession,
+		cwd: plan.remoteCwd,
+		sessionFile: plan.remoteSessionFile,
+		prompt: plan.host.continuationPrompt,
+		logFile: `${runnerDir}/logs/${plan.tmuxSession}.log`,
+	};
+
+	if (plan.host.launch.command) {
+		await remoteBash(
+			pi,
+			plan.host.ssh,
+			renderTemplate(plan.host.launch.command, { remoteCwd: plan.remoteCwd, sessionFile: plan.remoteSessionFile, prompt: plan.host.continuationPrompt, tmuxSession: plan.tmuxSession }),
+			"Could not launch remote Pi.",
+		);
+		return;
+	}
+
+	await installRemoteRunner(pi, plan.host.ssh, runnerDir, runnerPath);
+	await writeRemoteFile(pi, plan.host.ssh, planPath, JSON.stringify(launchPlan, null, 2));
+	const result = await remoteBash(pi, plan.host.ssh, `${q(runnerPath)} ${q(planPath)}`, "Could not launch remote Pi.");
+	if (result.stdout.trim()) console.log(result.stdout.trim());
 }
+
+async function installRemoteRunner(pi: ExtensionAPI, ssh: string, runnerDir: string, runnerPath: string) {
+	await remoteBash(pi, ssh, `mkdir -p ${q(runnerDir)} ${q(`${runnerDir}/plans`)} ${q(`${runnerDir}/logs`)}`, "Could not create remote runner directory.");
+	await writeRemoteFile(pi, ssh, runnerPath, REMOTE_RUNNER);
+	await remoteBash(pi, ssh, `chmod +x ${q(runnerPath)}`, "Could not mark remote runner executable.");
+}
+
+async function writeRemoteFile(pi: ExtensionAPI, ssh: string, path: string, content: string) {
+	const encoded = Buffer.from(content, "utf8").toString("base64");
+	await remoteBash(pi, ssh, `mkdir -p ${q(dirname(path))} && base64 -d > ${q(path)} <<'PI_PUSH_EOF'\n${encoded}\nPI_PUSH_EOF`, `Could not write remote file: ${path}`);
+}
+
+const REMOTE_RUNNER = `#!/usr/bin/env bash
+set -euo pipefail
+
+plan_file="\${1:-}"
+if [ -z "$plan_file" ] || [ ! -f "$plan_file" ]; then
+  echo "Usage: $0 <launch-plan.json>" >&2
+  exit 2
+fi
+
+json_get() {
+  node -e "const fs=require('fs'); const p=JSON.parse(fs.readFileSync(process.argv[1],'utf8')); console.log(p[process.argv[2]] || '')" "$plan_file" "$1"
+}
+
+load_env() {
+  [ -f "$HOME/.profile" ] && . "$HOME/.profile" >/dev/null 2>&1 || true
+  [ -f "$HOME/.bashrc" ] && . "$HOME/.bashrc" >/dev/null 2>&1 || true
+  if [ -x "$HOME/.local/bin/mise" ]; then eval "$($HOME/.local/bin/mise activate bash)" >/dev/null 2>&1 || true; fi
+  if command -v mise >/dev/null 2>&1; then eval "$(mise activate bash)" >/dev/null 2>&1 || true; fi
+}
+
+find_pi() {
+  command -v pi 2>/dev/null && return 0
+  if command -v npm >/dev/null 2>&1; then
+    local npm_pi="$(npm prefix -g 2>/dev/null)/bin/pi"
+    [ -x "$npm_pi" ] && printf '%s\\n' "$npm_pi" && return 0
+  fi
+  if command -v mise >/dev/null 2>&1; then
+    local mise_pi="$(mise where node 2>/dev/null)/bin/pi"
+    [ -x "$mise_pi" ] && printf '%s\\n' "$mise_pi" && return 0
+  fi
+  for mise_pi in "$HOME"/.local/share/mise/installs/node/*/bin/pi; do
+    [ -x "$mise_pi" ] && printf '%s\\n' "$mise_pi" && return 0
+  done
+  return 1
+}
+
+load_env
+
+tmux_session="$(json_get tmuxSession)"
+cwd="$(json_get cwd)"
+session_file="$(json_get sessionFile)"
+prompt="$(json_get prompt)"
+log_file="$(json_get logFile)"
+pi_path="$(find_pi)" || { echo "Could not find pi. Install pi or add it to PATH." >&2; exit 1; }
+
+mkdir -p "$(dirname "$log_file")"
+
+if tmux has-session -t "$tmux_session" 2>/dev/null; then
+  echo "Pi session already exists: $tmux_session"
+  echo "Attach: tmux attach -t $tmux_session"
+  exit 0
+fi
+
+tmux new-session -d -s "$tmux_session" "cd '$cwd' && '$pi_path' --session '$session_file' '$prompt' 2>&1 | tee '$log_file'; exec bash"
+
+echo "Started Pi in tmux session: $tmux_session"
+echo "Attach: tmux attach -t $tmux_session"
+echo "Log: $log_file"
+`;
 
 function renderTemplate(template: string, vars: Record<string, string>) {
 	return template.replace(/{{\s*(\w+)\s*}}/g, (_, key) => q(vars[key] ?? ""));
