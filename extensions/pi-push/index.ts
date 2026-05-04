@@ -444,7 +444,8 @@ async function launchRemote(pi: ExtensionAPI, plan: PushPlan) {
 	await installRemoteRunner(pi, plan.host.ssh, runnerDir, runnerPath);
 	await writeRemoteFile(pi, plan.host.ssh, planPath, JSON.stringify(launchPlan, null, 2));
 	const result = await remoteBash(pi, plan.host.ssh, `${q(runnerPath)} ${q(planPath)}`, "Could not launch remote Pi.");
-	if (result.stdout.trim()) console.log(result.stdout.trim());
+	const output = [result.stdout, result.stderr].filter(Boolean).join("\n").trim();
+	if (output) console.log(output);
 }
 
 async function installRemoteRunner(pi: ExtensionAPI, ssh: string, runnerDir: string, runnerPath: string) {
@@ -501,21 +502,39 @@ cwd="$(json_get cwd)"
 session_file="$(json_get sessionFile)"
 prompt="$(json_get prompt)"
 log_file="$(json_get logFile)"
+launch_log="$(dirname "$log_file")/$tmux_session-launch.log"
 pi_path="$(find_pi)" || { echo "Could not find pi. Install pi or add it to PATH." >&2; exit 1; }
 
 mkdir -p "$(dirname "$log_file")"
+{
+  echo "plan_file=$plan_file"
+  echo "tmux_session=$tmux_session"
+  echo "cwd=$cwd"
+  echo "session_file=$session_file"
+  echo "pi_path=$pi_path"
+  echo "log_file=$log_file"
+  date
+} > "$launch_log"
 
 if tmux has-session -t "$tmux_session" 2>/dev/null; then
   echo "Pi session already exists: $tmux_session"
   echo "Attach: tmux attach -t $tmux_session"
+  echo "Launch log: $launch_log"
   exit 0
 fi
 
+if [ ! -d "$cwd" ]; then
+  echo "Remote cwd does not exist: $cwd" | tee -a "$launch_log" >&2
+  exit 1
+fi
+
 tmux new-session -d -s "$tmux_session" "cd '$cwd' && '$pi_path' --session '$session_file' '$prompt' 2>&1 | tee '$log_file'; exec bash"
+tmux has-session -t "$tmux_session" 2>/dev/null || { echo "tmux session failed to start: $tmux_session" | tee -a "$launch_log" >&2; exit 1; }
 
 echo "Started Pi in tmux session: $tmux_session"
 echo "Attach: tmux attach -t $tmux_session"
 echo "Log: $log_file"
+echo "Launch log: $launch_log"
 `;
 
 function renderTemplate(template: string, vars: Record<string, string>) {
