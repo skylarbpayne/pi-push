@@ -64,10 +64,10 @@ export default function (pi: ExtensionAPI) {
 		handler: async (args, ctx) => {
 			try {
 				await ctx.waitForIdle();
-				const dryRun = /(?:^|\s)--dry-run(?:\s|$)/.test(args);
-				const hostArg = args.replace(/(?:^|\s)--dry-run(?:\s|$)/g, " ").trim();
+				const parsedArgs = parseArgs(args);
 				const config = await loadConfig(ctx.cwd);
-				const { hostName, host } = resolveHost(config, hostArg);
+				const { hostName, host } = resolveHost(config, parsedArgs.hostArg);
+				if (parsedArgs.prompt) host.continuationPrompt = parsedArgs.prompt;
 
 				const sessionFile = ctx.sessionManager.getSessionFile();
 				if (!sessionFile) throw new Error("This Pi session is not persisted. Start Pi without --no-session, then try again.");
@@ -76,10 +76,10 @@ export default function (pi: ExtensionAPI) {
 				await checkLocalPrereqs(pi);
 				await ensureRemotePrereqs(pi, ctx, host.ssh);
 
-				const plan = await buildPlan(pi, ctx, hostName, host, sessionFile, dryRun);
+				const plan = await buildPlan(pi, ctx, hostName, host, sessionFile, parsedArgs.dryRun);
 				if (!(await confirmPlan(ctx, plan))) return;
 
-				if (dryRun) {
+				if (parsedArgs.dryRun) {
 					showPlan(ctx, plan);
 					return;
 				}
@@ -121,6 +121,69 @@ function mergeConfig(...configs: PushConfig[]): PushConfig {
 		}
 	}
 	return out;
+}
+
+type ParsedArgs = { hostArg: string; dryRun: boolean; prompt?: string };
+
+function parseArgs(args: string): ParsedArgs {
+	const tokens = shellSplit(args);
+	let hostArg = "";
+	let dryRun = false;
+	let prompt: string | undefined;
+
+	for (let i = 0; i < tokens.length; i++) {
+		const token = tokens[i];
+		if (token === "--dry-run") {
+			dryRun = true;
+		} else if (token === "--prompt") {
+			prompt = tokens[++i];
+			if (!prompt) throw new Error('Usage: /push <host> --prompt "continuation prompt"');
+		} else if (token.startsWith("--prompt=")) {
+			prompt = token.slice("--prompt=".length);
+			if (!prompt) throw new Error('Usage: /push <host> --prompt "continuation prompt"');
+		} else if (token.startsWith("--")) {
+			throw new Error(`Unknown option: ${token}`);
+		} else if (!hostArg) {
+			hostArg = token;
+		} else {
+			throw new Error(`Unexpected argument: ${token}. Use --prompt for continuation text.`);
+		}
+	}
+
+	return { hostArg, dryRun, prompt };
+}
+
+function shellSplit(input: string): string[] {
+	const tokens: string[] = [];
+	let token = "";
+	let quote: '"' | "'" | null = null;
+	let escaping = false;
+
+	for (const char of input) {
+		if (escaping) {
+			token += char;
+			escaping = false;
+		} else if (char === "\\" && quote !== "'") {
+			escaping = true;
+		} else if (quote) {
+			if (char === quote) quote = null;
+			else token += char;
+		} else if (char === '"' || char === "'") {
+			quote = char;
+		} else if (/\s/.test(char)) {
+			if (token) {
+				tokens.push(token);
+				token = "";
+			}
+		} else {
+			token += char;
+		}
+	}
+
+	if (escaping) token += "\\";
+	if (quote) throw new Error("Unclosed quote in /push arguments.");
+	if (token) tokens.push(token);
+	return tokens;
 }
 
 function resolveHost(config: PushConfig, hostArg: string): { hostName: string; host: Required<HostConfig> } {
@@ -443,9 +506,16 @@ async function launchRemote(pi: ExtensionAPI, plan: PushPlan) {
 
 	await installRemoteRunner(pi, plan.host.ssh, runnerDir, runnerPath);
 	await writeRemoteFile(pi, plan.host.ssh, planPath, JSON.stringify(launchPlan, null, 2));
-	const result = await remoteBash(pi, plan.host.ssh, `${q(runnerPath)} ${q(planPath)}`, "Could not launch remote Pi.");
-	const output = [result.stdout, result.stderr].filter(Boolean).join("\n").trim();
-	if (output) console.log(output);
+	const launchLog = `${runnerDir}/logs/${plan.tmuxSession}-launch.log`;
+	await remoteBash(
+		pi,
+		plan.host.ssh,
+		`nohup ${q(runnerPath)} ${q(planPath)} > ${q(launchLog)} 2>&1 < /dev/null &`,
+		"Could not start remote Pi launcher.",
+	);
+	console.log(`Started remote launcher for tmux session: ${plan.tmuxSession}`);
+	console.log(`Attach: ssh ${plan.host.ssh} -t tmux attach -t ${plan.tmuxSession}`);
+	console.log(`Launch log: ${launchLog}`);
 }
 
 async function installRemoteRunner(pi: ExtensionAPI, ssh: string, runnerDir: string, runnerPath: string) {
