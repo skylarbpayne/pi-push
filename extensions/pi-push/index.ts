@@ -1,7 +1,7 @@
 import { existsSync, statSync } from "node:fs";
-import { copyFile, mkdir, readFile } from "node:fs/promises";
+import { mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
-import { homedir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import type { ExtensionAPI, SessionEntry } from "@mariozechner/pi-coding-agent";
 
 type LaunchConfig = {
@@ -40,6 +40,7 @@ type PushPlan = {
 	hostName: string;
 	host: Required<HostConfig>;
 	sessionFile: string;
+	sessionCopyFile: string;
 	sessionId: string;
 	shortSessionId: string;
 	remoteSessionFile: string;
@@ -220,8 +221,8 @@ echo none
 async function buildPlan(pi: ExtensionAPI, ctx: any, hostName: string, host: Required<HostConfig>, sessionFile: string, dryRun: boolean): Promise<PushPlan> {
 	const remoteHome = (await remoteBash(pi, host.ssh, "printf %s \"$HOME\"", "Could not resolve remote home directory.")).stdout.trim();
 	const expandedHost = expandHostRemotePaths(host, remoteHome);
-	const header = JSON.parse((await readFile(sessionFile, "utf8")).split("\n", 1)[0] ?? "{}");
-	const sessionId = String(header.id ?? basenameNoExt(sessionFile));
+	const sessionSnapshot = await getSessionSnapshot(ctx, sessionFile);
+	const sessionId = sessionSnapshot.sessionId;
 	const shortSessionId = sessionId.slice(0, 8);
 	const remoteSessionFile = `${trimSlash(expandedHost.remoteSessionDir)}/${basenameNoExt(sessionFile)}-${shortSessionId}.jsonl`;
 	const repos = await inferRepos(pi, ctx, expandedHost, sessionId);
@@ -230,6 +231,7 @@ async function buildPlan(pi: ExtensionAPI, ctx: any, hostName: string, host: Req
 		hostName,
 		host: expandedHost,
 		sessionFile,
+		sessionCopyFile: sessionSnapshot.file,
 		sessionId,
 		shortSessionId,
 		remoteSessionFile,
@@ -238,6 +240,26 @@ async function buildPlan(pi: ExtensionAPI, ctx: any, hostName: string, host: Req
 		tmuxSession: `${host.launch.tmuxPrefix ?? "pi-push"}-${shortSessionId}`,
 		dryRun,
 	};
+}
+
+async function getSessionSnapshot(ctx: any, sessionFile: string): Promise<{ file: string; sessionId: string }> {
+	if (existsSync(sessionFile)) {
+		const header = JSON.parse((await readFile(sessionFile, "utf8")).split("\n", 1)[0] ?? "{}");
+		return { file: sessionFile, sessionId: String(header.id ?? ctx.sessionManager.getSessionId?.() ?? basenameNoExt(sessionFile)) };
+	}
+
+	const header = ctx.sessionManager.getHeader?.() ?? {
+		type: "session",
+		version: 3,
+		id: ctx.sessionManager.getSessionId?.() ?? basenameNoExt(sessionFile),
+		timestamp: new Date().toISOString(),
+		cwd: ctx.cwd,
+	};
+	const entries = ctx.sessionManager.getEntries?.() ?? [];
+	const dir = await mkdtemp(join(tmpdir(), "pi-push-session-"));
+	const file = join(dir, basenameNoExt(sessionFile) + ".jsonl");
+	await writeFile(file, [header, ...entries].map((entry) => JSON.stringify(entry)).join("\n") + "\n", "utf8");
+	return { file, sessionId: String(header.id ?? basenameNoExt(sessionFile)) };
 }
 
 async function inferRepos(pi: ExtensionAPI, ctx: any, host: Required<HostConfig>, sessionId: string): Promise<RepoPlan[]> {
@@ -348,7 +370,7 @@ async function executePlan(pi: ExtensionAPI, ctx: any, plan: PushPlan) {
 
 async function copySession(pi: ExtensionAPI, plan: PushPlan) {
 	await remoteBash(pi, plan.host.ssh, `mkdir -p ${q(dirname(plan.remoteSessionFile))}`, "Could not create remote session directory.");
-	await run(pi, "scp", [plan.sessionFile, `${plan.host.ssh}:${plan.remoteSessionFile}`], "Could not copy session file.");
+	await run(pi, "scp", [plan.sessionCopyFile, `${plan.host.ssh}:${plan.remoteSessionFile}`], "Could not copy session file.");
 }
 
 async function createAndPushHandoff(pi: ExtensionAPI, repo: RepoPlan, sessionId: string) {
